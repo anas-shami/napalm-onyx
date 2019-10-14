@@ -116,7 +116,7 @@ def bgp_normalize_table_data(bgp_table):
 
 
 def bgp_table_parser(bgp_table):
-    """Generate that parses a line of bgp summary table and returns a dict compatible with NAPALM
+    """Generate that parses a line of bgp summary table and returns a dict compatible with NAPALM.
 
     Example line:
     10.2.1.14       4    10  472516  472238      361    0    0     3w1d 9
@@ -543,7 +543,7 @@ class ONYXSSHDriver(NetworkDriver):
         self.device.send_command("exit", expect_string=r'\(config\)')
 
     def show_vlans(self):
-        """Return a lists of created vlans on switch"""
+        """Return a lists of created vlans on switch."""
         self.disable_paging()
         command = 'show vlan | json-print'
         output = self.device.send_command(command)
@@ -708,7 +708,7 @@ class ONYXSSHDriver(NetworkDriver):
         raise NotImplementedError("get_interfaces_ip is not supported yet for onyx devices")
 
     def get_mac_address_table(self):
-        """Return a lists of dictionaries. Each dictionary represents an entry in the MAC Address
+        """Return a lists of dictionaries. Each dictionary represents an entry in the MAC Address.
 
         Table, having the following keys
             * mac (string)
@@ -773,10 +773,8 @@ class ONYXSSHDriver(NetworkDriver):
         raise NotImplementedError("traceroute is not supported yet for onyx devices")
 
     def get_config(self, retrieve='all'):
-        raise NotImplementedError("get_config is not supported yet for onyx devices")
+        """Return running configration as a json array.
 
-    def get_config(self, retrieve='all'):
-        """Return running configration as a json array, as the following:
         {
             'running': {
                 'Lines':[

@@ -88,7 +88,7 @@ class TestGetter(BaseTestGetters):
 
     @wrap_test_cases
     def test_get_config_filtered(self, test_case):
-        """Test get_config. filtered"""
+        """Test get_config filtered."""
         get_startup = self.device.get_config('startup')
         get_running = self.device.get_config('running')
         assert get_running != '' and get_startup != ''
