@@ -774,3 +774,39 @@ class ONYXSSHDriver(NetworkDriver):
 
     def get_config(self, retrieve='all'):
         raise NotImplementedError("get_config is not supported yet for onyx devices")
+
+    def get_config(self, retrieve='all'):
+        """Return running configration as a json array, as the following:
+        {
+            'running': {
+                'Lines':[
+                    '## Running database "initial"',
+                    '## Generated at 2019/10/13 11:22:35 +0000',
+                    '## Hostname: scorpion-xx',
+                    '## Product release: 3.8.1989-23',
+                    ....
+                    ]
+                },
+            'startup': '',
+            'candidate': ''
+        }
+        """
+        config = {"startup": "", "running": "", "candidate": ""}  # default values
+
+        if retrieve in ('running', 'all'):
+            command = 'show running-config | json-print'
+            running_config = self._send_command(command)
+            json_running = json.loads(running_config)
+            config['running'] = json_running
+
+        if retrieve in ('startup', 'all'):
+            command = 'show configuration files initial | json-print'
+            initial_config = self._send_command(command)
+            json_initial = json.loads(initial_config)
+            config['startup'] = json_initial
+
+        if retrieve in ('candidate', 'all'):
+            if self.merge_candidate:
+                json_candidate = json.loads(self.merge_candidate)
+                config['candidate'] = json_candidate
+        return config
