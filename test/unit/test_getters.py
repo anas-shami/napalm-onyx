@@ -92,4 +92,4 @@ class TestGetter(BaseTestGetters):
         get_startup = self.device.get_config('startup')
         get_running = self.device.get_config('running')
         assert get_running != '' and get_startup != ''
-        return [get_running, get_startup]
+        return {'running': get_running, 'startup': get_startup}

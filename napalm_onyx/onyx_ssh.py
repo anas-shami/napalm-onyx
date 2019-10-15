@@ -776,35 +776,50 @@ class ONYXSSHDriver(NetworkDriver):
         """Return running configration as a json array.
 
         {
-            'running': {
-                'Lines':[
-                    '## Running database "initial"',
-                    '## Generated at 2019/10/13 11:22:35 +0000',
-                    '## Hostname: scorpion-xx',
-                    '## Product release: 3.8.1989-23',
-                    ....
-                    ]
-                },
-            'startup': '',
+            'running': '##
+                        ## Running database "initial"
+                        ## Generated at 2019/08/06 04:11:38 +0000
+                        ## Hostname: spider-144
+                        ##
+
+                        ##
+                        ## Running-config temporary prefix mode setting
+                        ##
+                        no cli default prefix-modes enable
+                        ...',
+            'startup': '##
+                        ## Active saved database "initial"
+                        ## Generated at 2019/08/06 04:13:27 +0000
+                        ## Hostname: spider-144
+                        ##
+
+                        ##
+                        ## Running-config temporary prefix mode setting
+                        ##
+                        no cli default prefix-modes enable
+
+                        ##
+                        ## AAA remote server configuration
+                        ##
+                        # ldap bind-password ********
+                        # radius-server key ********
+                        # tacacs-server key ********',
             'candidate': ''
         }
         """
-        config = {"startup": "", "running": "", "candidate": ""}  # default values
+        config = {'startup': '', 'running': '', 'candidate': ''}  # default values
 
         if retrieve in ('running', 'all'):
-            command = 'show running-config | json-print'
+            command = 'show running-config'
             running_config = self._send_command(command)
-            json_running = json.loads(running_config)
-            config['running'] = json_running
+            config['running'] = py23_compat.text_type(running_config)
 
         if retrieve in ('startup', 'all'):
-            command = 'show configuration files initial | json-print'
+            command = 'show configuration files initial'
             initial_config = self._send_command(command)
-            json_initial = json.loads(initial_config)
-            config['startup'] = json_initial
+            config['startup'] = py23_compat.text_type(initial_config)
 
         if retrieve in ('candidate', 'all'):
             if self.merge_candidate:
-                json_candidate = json.loads(self.merge_candidate)
-                config['candidate'] = json_candidate
+                config['candidate'] = py23_compat.text_type(self.merge_candidate)
         return config
