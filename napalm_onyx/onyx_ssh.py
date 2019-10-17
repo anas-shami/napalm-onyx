@@ -27,8 +27,11 @@ import json
 import os
 import uuid
 import tempfile
+from scp import SCPClient
 import hashlib
 import socket
+import paramiko
+import time
 
 # import third party lib
 
@@ -142,7 +145,8 @@ class ONYXSSHDriver(NetworkDriver):
         self.loaded = False
         self.changed = False
         self.up = False
-        self.replace_file = None
+        self.replace_file = ""
+        self.remote_config_dir = '/var/opt/tms/text_configs/'
         self.merge_candidate = ''
         self.netmiko_optional_args = netmiko_args(optional_args)
         self.device = None
@@ -160,9 +164,9 @@ class ONYXSSHDriver(NetworkDriver):
             self._delete_file(self.backup_file)
         self._netmiko_close()
 
-    def _send_command(self, command):
+    def _send_command(self, command, expect_string=None):
         """Wrapper for Netmiko's send_command method."""
-        return self.device.send_command(command)
+        return self.device.send_command(command, expect_string=expect_string)
 
     @staticmethod
     def parse_uptime(uptime_str):
@@ -239,24 +243,73 @@ class ONYXSSHDriver(NetworkDriver):
         }
 
     def load_replace_candidate(self, filename=None, config=None):
+        """Load the file and replace it if exist on the host."""
+        if not filename and not config:
+            raise MergeConfigException('filename or config param must be provided.')
         self._replace_candidate(filename, config)
         self.replace = True
         self.loaded = True
 
     def _get_flash_size(self):
-        raise NotImplementedError("get_flash_size is not supported yet for onyx devices")
+        """Return the free bytes on the host under /var/."""
+        command = 'show files system'
+        output = self._send_command(command)
+        bytes_free = '0'
+        matches = re.findall(r'Space Free\s+(\d+) MB', output)
+        if matches and len(matches) >= 2:
+            bytes_free = matches[1]  # second group for /var folder
+        return int(bytes_free) * 1024
 
     def _enough_space(self, filename):
-        raise NotImplementedError("enough_space is not supported yet for onyx devices")
+        """Validate remote storage and if we able to transfare the file."""
+        flash_size = self._get_flash_size()
+        file_size = os.path.getsize(filename)
+        if file_size > flash_size:
+            return False
+        return True
 
     def _verify_remote_file_exists(self, dst, file_system='bootflash:'):
-        command = 'dir {0}/{1}'.format(file_system, dst)
+        """Check if the file already exsit on the host."""
+        command = 'show configuration files {0}'.format(dst)
         output = self.device.send_command(command)
-        if 'No such file' in output:
+        if 'Could not open config database' in output:
             raise ReplaceConfigException('Could not transfer file.')
 
     def _replace_candidate(self, filename, config):
-        raise NotImplementedError("replace_candidate is not supported yet for onyx devices")
+        if not filename:
+            filename = self._create_tmp_file(config)
+        else:
+            if not os.path.isfile(filename):
+                raise ReplaceConfigException("File {} not found".format(filename))
+
+        file_to_replace = filename
+        if not self._enough_space(file_to_replace):
+            msg = 'Could not transfer file. Not enough space on device.'
+            raise ReplaceConfigException(msg)
+
+        self._check_file_exists(file_to_replace)
+        dest = os.path.basename(file_to_replace)
+        full_remote_path = self.remote_config_dir + dest
+        with paramiko.SSHClient() as ssh:
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(hostname=self.hostname, username=self.username, password=self.password)
+            try:
+                with SCPClient(ssh.get_transport()) as scp_client:
+                    scp_client.put(file_to_replace, full_remote_path)
+            except Exception as e:
+                print(str(e))
+                time.sleep(10)
+                file_size = os.path.getsize(filename)
+                temp_size = self._verify_remote_file_exists(dest)
+                if int(temp_size) != int(file_size):
+                    msg = ('Could not transfer file. There was an error '
+                           'during transfer. Please make sure remote '
+                           'permissions are set.')
+                raise ReplaceConfigException(msg)
+        self.config_replace = True
+        self.replace_file = filename  # this will be initialized when the file uploaded successfully
+        with open(self.replace_file) as f:
+            self.merge_candidate = f.read()  # replace candidate to next commit
 
     def _file_already_exists(self, dst):
         dst_hash = self._get_remote_md5(dst)
@@ -288,6 +341,7 @@ class ONYXSSHDriver(NetworkDriver):
         return md5.hexdigest()
 
     def load_merge_candidate(self, filename=None, config=None):
+        """Load the config but don't send it to switch."""
         self.replace = False
         self.loaded = True
 
@@ -296,7 +350,7 @@ class ONYXSSHDriver(NetworkDriver):
 
         self.merge_candidate += '\n'  # insert one extra line
         if filename is not None:
-            with open(filename, "r") as f:
+            with open(filename, "rb") as f:
                 self.merge_candidate += f.read()
         else:
             self.merge_candidate += config
@@ -306,29 +360,33 @@ class ONYXSSHDriver(NetworkDriver):
         tmp_dir = tempfile.gettempdir()
         rand_fname = py23_compat.text_type(uuid.uuid4())
         filename = os.path.join(tmp_dir, rand_fname)
-        with open(filename, 'wt') as fobj:
+        with open(filename, 'wb') as fobj:
             fobj.write(config)
         return filename
 
-    def _create_sot_file(self):
-        """Create Source of Truth file to compare."""
-        commands = ['terminal dont-ask', 'checkpoint file sot_file']
-        self._send_config_commands(commands)
-
     def _get_diff(self):
-        """Get a diff between running config and a proposed file."""
+        """Get a diff between a proposed file and running config.
+
+        we don't have direct command to compare text file with running config
+        so will loop through file lines and comapre
+        """
         diff = []
-        self._create_sot_file()
-        command = ('show diff rollback-patch file {0} file {1}'.format(
-                   'sot_file', self.replace_file.split('/')[-1]))
-        diff_out = self.device.send_command(command)
+        running_config = self.get_config(retrieve='running')['running']
+        running_lines = running_config.splitlines()
+
+        if self.replace_file is not None:  # this will be assigned when the file is uploaded successfully to switch
+            with open(self.replace_file, "rb") as f:
+                text = f.read()
+                uploaded_lines = text.splitlines() if text else []
+        for line in uploaded_lines:
+            if line not in running_lines and line.strip() != '':
+                if not line.strip().startswith('#'):
+                    diff.append(line)
         try:
-            diff_out = diff_out.split(
-                'Generating Rollback Patch')[1].replace(
-                    'Rollback Patch is Empty', '').strip()
-            for line in diff_out.splitlines():
+            diff_out_str = '\n'.join(diff)
+            for line in diff_out_str.splitlines():
                 if line:
-                    if line[0].strip() != '!' and line[0].strip() != '.':
+                    if not line.strip().startswith('#') and line.strip() != '':
                         diff.append(line.rstrip(' '))
         except (AttributeError, KeyError):
             raise ReplaceConfigException(
@@ -339,9 +397,10 @@ class ONYXSSHDriver(NetworkDriver):
         diff = []
         running_config = self.get_config(retrieve='running')['running']
         running_lines = running_config.splitlines()
-        for line in self.merge_candidate.splitlines():
+        candidate_lines = self.merge_candidate.splitlines()
+        for line in candidate_lines:
             if line not in running_lines and line:
-                if line[0].strip() != '!':
+                if not line[0].startswith('#'):
                     diff.append(line)
         return '\n'.join(diff)
         # the merge diff is not necessarily what needs to be loaded
@@ -354,10 +413,10 @@ class ONYXSSHDriver(NetworkDriver):
         # previously: self.merge_candidate = '\n'.join(diff)
 
     def compare_config(self):
+        """Compare between loaded candidate config or uploaded candidate vs running config."""
         if self.loaded:
             if not self.replace:
                 return self._get_merge_diff()
-                # return self.merge_candidate
             diff = self._get_diff()
             return diff
         return ''
@@ -373,14 +432,19 @@ class ONYXSSHDriver(NetworkDriver):
 
     def _commit_merge(self):
         try:
-            commands = [command for command in self.merge_candidate.splitlines() if command]
-            output = self.device.send_config_set(commands)
+            self.config_terminal()
+            filename = self.replace_file.split('/')[-1]
+            command = "configuration text file {0} apply".format(filename)
+            expected_config_mode = r"\(config\)"
+            output = self._send_command(command, expect_string=expected_config_mode)
+            if output and '%' in output:
+                print(output)
+                return False
         except Exception as e:
             raise MergeConfigException(str(e))
-        if 'Invalid command' in output:
-            raise MergeConfigException('Error while applying config!')
         # clear the merge buffer
         self.merge_candidate = ''
+        return output
 
     def _save_to_checkpoint(self, filename):
         """Save the current running config to the given file."""
@@ -399,21 +463,31 @@ class ONYXSSHDriver(NetworkDriver):
         elif rollback_result == []:
             raise ReplaceConfigException
 
-    def _delete_file(self, filename):
-        commands = [
-            'terminal dont-ask',
-            'delete {}'.format(filename),
-            'no terminal dont-ask'
-        ]
-        for command in commands:
-            self.device.send_command(command)
+    def _delete_file(self, filepath):
+        self.config_terminal()
+        filename = filepath.split('/')[-1]
+        command = "configuration text file {0} delete".format(filename)
+        expected_config_mode = r"\(config\)"
+        output = self._send_command(command, expect_string=expected_config_mode)
+        if output and "%" in output:
+            print(output)
+            return False
+        return True
+
+    def commit_config(self):
+        """Apply the candidate configration on the switch and do merge."""
+        self._commit_merge()
 
     def discard_config(self):
+        """Delete the uploaded file from remote host."""
         if self.loaded:
             self.merge_candidate = ''  # clear the buffer
         if self.loaded and self.replace:
-            self._delete_file(self.replace_file)
+            is_file_deleted = self._delete_file(self.replace_file)
+            if is_file_deleted:
+                print('Candidate uploaded file was deleted successfully')
         self.loaded = False
+        self.replace = False
 
     def rollback(self):
         if self.changed:
@@ -603,9 +677,13 @@ class ONYXSSHDriver(NetworkDriver):
     def get_bgp_neighbors(self):
         raise NotImplementedError("get_bgp_neighbors is not supported yet for onyx devices")
 
-    def _send_config_commands(self, commands):
+    def _send_config_commands(self, commands, expect_string=None):
+        outputs_lines = ''
         for command in commands:
-            self.device.send_command(command)
+            cmd_output = self._send_command(command, expect_string=expect_string)
+            if cmd_output:
+                outputs_lines += cmd_output
+        return outputs_lines
 
     def _set_checkpoint(self, filename):
         commands = ['terminal dont-ask', 'checkpoint file {0}'.format(filename)]
