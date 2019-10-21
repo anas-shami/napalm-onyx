@@ -13,3 +13,9 @@ This driver initially targets the Mellanox device with Onyx OS though other, sim
 * get_lldp_neighbors
 * is_alive
 * cli
+* get_config
+* load_merge_candidate
+* load_replace_candidate
+* discard_config
+* compare_config
+* commit_config
