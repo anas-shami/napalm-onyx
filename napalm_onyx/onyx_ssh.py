@@ -160,9 +160,9 @@ class ONYXSSHDriver(NetworkDriver):
             self._delete_file(self.backup_file)
         self._netmiko_close()
 
-    def _send_command(self, command):
+    def _send_command(self, command, expect_string=None):
         """Wrapper for Netmiko's send_command method."""
-        return self.device.send_command(command)
+        return self.device.send_command(command, expect_string=expect_string)
 
     @staticmethod
     def parse_uptime(uptime_str):
@@ -399,21 +399,28 @@ class ONYXSSHDriver(NetworkDriver):
         elif rollback_result == []:
             raise ReplaceConfigException
 
-    def _delete_file(self, filename):
-        commands = [
-            'terminal dont-ask',
-            'delete {}'.format(filename),
-            'no terminal dont-ask'
-        ]
-        for command in commands:
-            self.device.send_command(command)
+    def _delete_file(self, filepath):
+        self.config_terminal()
+        filename = filepath.split('/')[-1]
+        command = "configuration text file {0} delete".format(filename)
+        expected_config_mode = r"\(config\)"
+        output = self._send_command(command, expect_string=expected_config_mode)
+        if output and "%" in output:
+            print(output)
+            return False
+        return True
 
     def discard_config(self):
+        """Delete the uploaded file from remote host."""
         if self.loaded:
             self.merge_candidate = ''  # clear the buffer
+            print('Flush candidate loaded data successfully')
         if self.loaded and self.replace:
-            self._delete_file(self.replace_file)
+            is_file_deleted = self._delete_file(self.replace_file)
+            if is_file_deleted:
+                print('Candidate uploaded file was deleted successfully')
         self.loaded = False
+        self.replace = False
 
     def rollback(self):
         if self.changed:
