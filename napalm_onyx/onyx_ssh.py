@@ -316,32 +316,33 @@ class ONYXSSHDriver(NetworkDriver):
         self._send_config_commands(commands)
 
     def _get_diff(self):
-        """Get a diff between running config and a proposed file."""
+        """Get a diff between a proposed file and running config.
+
+        we don't have direct command to compare text file with running config
+        so will loop through file lines and comapre
+        """
         diff = []
-        self._create_sot_file()
-        command = ('show diff rollback-patch file {0} file {1}'.format(
-                   'sot_file', self.replace_file.split('/')[-1]))
-        diff_out = self.device.send_command(command)
-        try:
-            diff_out = diff_out.split(
-                'Generating Rollback Patch')[1].replace(
-                    'Rollback Patch is Empty', '').strip()
-            for line in diff_out.splitlines():
-                if line:
-                    if line[0].strip() != '!' and line[0].strip() != '.':
-                        diff.append(line.rstrip(' '))
-        except (AttributeError, KeyError):
-            raise ReplaceConfigException(
-                'Could not calculate diff. It\'s possible the given file doesn\'t exist.')
+        running_config = self.get_config(retrieve='running')['running']
+        running_lines = [line.strip() for line in running_config.splitlines()]
+
+        if self.replace_file is not None:  # this will be assigned when the file is uploaded successfully to switch
+            with open(self.replace_file, "rb") as f:
+                text = f.read()
+                uploaded_lines = text.splitlines() if text else []
+                for line in uploaded_lines:
+                    if line not in running_lines and line.strip() != '':
+                        if not line.strip().startswith('#'):
+                            diff.append(line)
         return '\n'.join(diff)
 
     def _get_merge_diff(self):
         diff = []
         running_config = self.get_config(retrieve='running')['running']
-        running_lines = running_config.splitlines()
-        for line in self.merge_candidate.splitlines():
-            if line not in running_lines and line:
-                if line[0].strip() != '!':
+        running_lines = [line.strip() for line in running_config.splitlines()]  # striped to avoid any spaces issues
+        candidate_lines = self.merge_candidate.splitlines()
+        for line in candidate_lines:
+            if line and line not in running_lines:
+                if not line[0].startswith('#'):
                     diff.append(line)
         return '\n'.join(diff)
         # the merge diff is not necessarily what needs to be loaded
@@ -354,10 +355,10 @@ class ONYXSSHDriver(NetworkDriver):
         # previously: self.merge_candidate = '\n'.join(diff)
 
     def compare_config(self):
+        """Compare between loaded candidate config or uploaded candidate vs running config."""
         if self.loaded:
             if not self.replace:
                 return self._get_merge_diff()
-                # return self.merge_candidate
             diff = self._get_diff()
             return diff
         return ''
