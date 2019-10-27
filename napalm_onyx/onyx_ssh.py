@@ -377,7 +377,7 @@ class ONYXSSHDriver(NetworkDriver):
             output = self.device.send_config_set(commands)
         except Exception as e:
             raise MergeConfigException(str(e))
-        if 'Invalid command' in output:
+        if '%' in output:
             raise MergeConfigException('Error while applying config!')
         # clear the merge buffer
         self.merge_candidate = ''
@@ -398,6 +398,10 @@ class ONYXSSHDriver(NetworkDriver):
             raise ReplaceConfigException(rollback_result)
         elif rollback_result == []:
             raise ReplaceConfigException
+
+    def commit_merge(self):
+        """Apply the candidate configration on the switch and do merge."""
+        self._commit_merge()
 
     def _delete_file(self, filename):
         commands = [
