@@ -29,6 +29,9 @@ import uuid
 import tempfile
 import hashlib
 import socket
+import paramiko
+import time
+from scp import SCPClient
 
 # import third party lib
 
@@ -160,9 +163,9 @@ class ONYXSSHDriver(NetworkDriver):
             self._delete_file(self.backup_file)
         self._netmiko_close()
 
-    def _send_command(self, command):
+    def _send_command(self, command, expect_string=None):
         """Wrapper for Netmiko's send_command method."""
-        return self.device.send_command(command)
+        return self.device.send_command(command, expect_string=expect_string)
 
     @staticmethod
     def parse_uptime(uptime_str):
@@ -239,6 +242,9 @@ class ONYXSSHDriver(NetworkDriver):
         }
 
     def load_replace_candidate(self, filename=None, config=None):
+        """Load the file and replace it if exist on the host."""
+        if not filename and not config:
+            raise MergeConfigException('filename or config param must be provided.')
         self._replace_candidate(filename, config)
         self.replace = True
         self.loaded = True
@@ -247,16 +253,58 @@ class ONYXSSHDriver(NetworkDriver):
         raise NotImplementedError("get_flash_size is not supported yet for onyx devices")
 
     def _enough_space(self, filename):
-        raise NotImplementedError("enough_space is not supported yet for onyx devices")
+        """Return the free bytes on the host under /var/."""
+        command = 'show files system'
+        output = self._send_command(command)
+        bytes_free = '0'
+        matches = re.findall(r'Space Free\s+(\d+) MB', output)
+        if matches and len(matches) >= 2:
+            bytes_free = matches[1]  # second group for /var folder
+        return int(bytes_free) * 1024
 
-    def _verify_remote_file_exists(self, dst, file_system='bootflash:'):
-        command = 'dir {0}/{1}'.format(file_system, dst)
-        output = self.device.send_command(command)
-        if 'No such file' in output:
-            raise ReplaceConfigException('Could not transfer file.')
+    def _verify_remote_file_exists(self, dst):
+        """Check if the file already exsit on the host."""
+        command = 'show configuration files {0}'.format(dst)
+        output = self._send_command(command)
+        if '%' in output:
+            return False
+        return True
 
     def _replace_candidate(self, filename, config):
-        raise NotImplementedError("replace_candidate is not supported yet for onyx devices")
+        if not filename:
+            filename = self._create_tmp_file(config)
+        else:
+            if not os.path.isfile(filename):
+                raise ReplaceConfigException("File {} not found".format(filename))
+
+        file_to_replace = filename
+        if not self._enough_space(file_to_replace):
+            msg = 'Could not transfer file. Not enough space on device.'
+            raise ReplaceConfigException(msg)
+
+        self._check_file_exists(file_to_replace)
+        dest = os.path.basename(file_to_replace)
+        full_remote_path = self.remote_config_dir + dest
+        with paramiko.SSHClient() as ssh:
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(hostname=self.hostname, username=self.username, password=self.password)
+            try:
+                with SCPClient(ssh.get_transport()) as scp_client:
+                    scp_client.put(file_to_replace, full_remote_path)
+            except Exception as e:
+                print(str(e))
+                time.sleep(10)
+                file_size = os.path.getsize(filename)
+                temp_size = self._verify_remote_file_exists(dest)
+                if int(temp_size) != int(file_size):
+                    msg = ('Could not transfer file. There was an error '
+                           'during transfer. Please make sure remote '
+                           'permissions are set.')
+                raise ReplaceConfigException(msg)
+        self.config_replace = True
+        self.replace_file = filename  # this will be initialized when the file uploaded successfully
+        with open(self.replace_file) as f:
+            self.merge_candidate = f.read()  # replace candidate to next commit
 
     def _file_already_exists(self, dst):
         dst_hash = self._get_remote_md5(dst)
